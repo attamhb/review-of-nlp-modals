@@ -1,13 +1,13 @@
+import re
 from torchtext.datasets import IMDB
 from torch.utils.data.dataset import random_split
 import torch
 import torch.nn as nn
 import sys
 
-import re
+from collections import Counter, OrderedDict
 from torchtext.vocab import vocab
 from pkg_resources import parse_version
-from collections import Counter, OrderedDict
 from torchtext import __version__ as torchtext_version
 from torch.utils.data import DataLoader
 
@@ -20,6 +20,9 @@ def tokenizer(text):
     text = re.sub("[\W]+", " ", text.lower()) + " ".join(emoticons).replace("-", "")
     tokenized = text.split()
     return tokenized
+
+
+#################################################################
 
 
 def collate_batch(batch):
@@ -35,7 +38,37 @@ def collate_batch(batch):
     return padded_text_list.to(device), label_list.to(device), lengths.to(device)
 
 
-#############################################################################
+############################################################
+def train(dataloader):
+    model.train()
+    total_acc, total_loss = 0, 0
+    for text_batch, label_batch, lengths in dataloader:
+        optimizer.zero_grad()
+        pred = model(text_batch, lengths)[:, 0]
+        loss = loss_fn(pred, label_batch)
+        loss.backward()
+        optimizer.step()
+        total_acc += ((pred >= 0.5).float() == label_batch).float().sum().item()
+        total_loss += loss.item() * label_batch.size(0)
+    return total_acc / len(dataloader.dataset), total_loss / len(dataloader.dataset)
+
+
+############################################################
+
+
+def evaluate(dataloader):
+    model.eval()
+    total_acc, total_loss = 0, 0
+    with torch.no_grad():
+        for text_batch, label_batch, lengths in dataloader:
+            pred = model(text_batch, lengths)[:, 0]
+            loss = loss_fn(pred, label_batch)
+            total_acc += ((pred >= 0.5).float() == label_batch).float().sum().item()
+            total_loss += loss.item() * label_batch.size(0)
+    return total_acc / len(dataloader.dataset), total_loss / len(dataloader.dataset)
+
+
+########################################################################
 train_dataset = IMDB(split="train")
 test_dataset = IMDB(split="test")
 torch.manual_seed(1)
@@ -105,3 +138,49 @@ embedding = nn.Embedding(num_embeddings=10, embedding_dim=3, padding_idx=0)
 text_encoded_input = torch.LongTensor([[1, 2, 4, 5], [4, 3, 2, 0]])
 
 print(embedding(text_encoded_input))
+
+
+# ### Building an RNN model for the sentiment analysis task
+
+
+class RNN(nn.Module):
+    def __init__(self, vocab_size, embed_dim, rnn_hidden_size, fc_hidden_size):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.rnn = nn.LSTM(embed_dim, rnn_hidden_size, batch_first=True)
+        self.fc1 = nn.Linear(rnn_hidden_size, fc_hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(fc_hidden_size, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, text, lengths):
+        out = self.embedding(text)
+        out = nn.utils.rnn.pack_padded_sequence(
+            out, lengths.cpu().numpy(), enforce_sorted=False, batch_first=True
+        )
+        out, (hidden, cell) = self.rnn(out)
+        out = hidden[-1, :, :]
+        out = self.fc1(out)
+        out = self.relu(out)
+        out = self.fc2(out)
+        out = self.sigmoid(out)
+        return out
+
+
+vocab_size = len(vocab)
+embed_dim = 20
+rnn_hidden_size = 64
+fc_hidden_size = 64
+model = RNN(vocab_size, embed_dim, rnn_hidden_size, fc_hidden_size)
+model = model.to(device)
+
+loss_fn = nn.BCELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+num_epochs = 10
+
+torch.manual_seed(1)
+for epoch in range(num_epochs):
+    acc_train, loss_train = train(train_dl)
+    acc_valid, loss_valid = evaluate(valid_dl)
+    print(f"Epoch {epoch} accuracy: {acc_train:.4f} val_accuracy: {acc_valid:.4f}")
